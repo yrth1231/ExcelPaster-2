@@ -1,8 +1,8 @@
 """
 Tabela Paster - Windows program za lepljenje celija iz Excel tabele.
 
-Hotkey-evi (rade samo dok je program upaljen):
-    Ctrl+B            nalepi trenutnu celiju u program u kome si
+Hotkey-evi (rade samo dok je program upaljen, imaju prednost nad Windowsom):
+    Ctrl+V            nalepi CELIJU u kojoj se nalazis, pa predje na sledecu (desno)
     Ctrl+strelice     kretanje po tabeli (strelice bez Ctrl rade normalno)
     Ctrl+N            novi red, od prve kolone
     Ctrl+Shift+P      pauza / nastavak (privremeno vraca normalne Windows tastere)
@@ -10,7 +10,6 @@ Hotkey-evi (rade samo dok je program upaljen):
 import csv
 import datetime
 import queue
-import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -38,6 +37,7 @@ for _cls in (fills.PatternFill, fills.GradientFill, fonts.Font, borders.Border,
              borders.Side, alignment.Alignment, protection.Protection):
     _ignore_extlst(_cls)
 
+
 ROW_H = 22
 HDR_H = 22
 RN_W = 44
@@ -47,6 +47,7 @@ COL_CURSOR = "#bcdcff"      # blago plava - trenutna celija
 COL_CURSOR_BORDER = "#2b7de9"
 COL_HDR = "#eeeeee"
 COL_HDR_ACTIVE = "#cfe3ff"
+COL_PINNED = "#fff3c4"      # pinovan prvi red
 
 
 def fmt(v):
@@ -67,8 +68,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Tabela Paster")
-        root.geometry("460x280+20+20")
-        root.minsize(260, 140)
+        root.geometry("540x300+20+20")
+        root.minsize(280, 140)
         root.attributes("-topmost", True)
 
         self.q = queue.Queue()
@@ -82,7 +83,7 @@ class App:
         self.sc = 0
         self.path = None
         self.paused = False
-        self.handles = []
+        self.handles = {}
         self.colpos = []
 
         top = ttk.Frame(root)
@@ -90,9 +91,13 @@ class App:
         ttk.Button(top, text="Učitaj tabelu", command=self.load).pack(side="left")
         self.sheet_var = tk.StringVar()
         self.sheet_cb = ttk.Combobox(top, textvariable=self.sheet_var,
-                                     state="readonly", width=14)
+                                     state="readonly", width=10)
         self.sheet_cb.pack(side="left", padx=4)
-        self.sheet_cb.bind("<<ComboboxSelected>>", lambda e: self.load_sheet(self.sheet_var.get()))
+        self.sheet_cb.bind("<<ComboboxSelected>>",
+                           lambda e: self.load_sheet(self.sheet_var.get()))
+        self.pin_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Pinuj prvi red", variable=self.pin_var,
+                        command=self.refresh).pack(side="left", padx=4)
         self.pause_btn = ttk.Button(top, text="Pauza", command=self.toggle_pause)
         self.pause_btn.pack(side="right")
 
@@ -110,9 +115,12 @@ class App:
         keyboard.add_hotkey("ctrl+shift+p", lambda: self.q.put(("pause",)), suppress=True)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.after(10, self.poll)
+        root.after(5, self.poll)
 
     # ---------- hotkey-evi ----------
+    def on_paste_key(self):
+        self.q.put(("paste",))
+
     def register_hotkeys(self):
         q = self.q
         pairs = [
@@ -121,18 +129,18 @@ class App:
             ("ctrl+up", lambda: q.put(("move", -1, 0))),
             ("ctrl+down", lambda: q.put(("move", 1, 0))),
             ("ctrl+n", lambda: q.put(("newrow",))),
-            ("ctrl+b", lambda: threading.Thread(target=self.do_paste, daemon=True).start()),
+            ("ctrl+v", self.on_paste_key),
         ]
         for key, fn in pairs:
-            self.handles.append(keyboard.add_hotkey(key, fn, suppress=True))
+            self.handles[key] = keyboard.add_hotkey(key, fn, suppress=True)
 
     def unregister_hotkeys(self):
-        for h in self.handles:
+        for h in list(self.handles.values()):
             try:
                 keyboard.remove_hotkey(h)
             except Exception:
                 pass
-        self.handles = []
+        self.handles = {}
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -144,20 +152,56 @@ class App:
             self.pause_btn.config(text="Pauza")
         self.update_status()
 
-    def do_paste(self):
-        if not self.data:
-            return
+    # ---------- lepljenje ----------
+    def set_clipboard(self, val):
+        """Postavi clipboard i proveri da je zaista tu. Vraca True samo ako jeste."""
+        want = val.replace("\r\n", "\n")
+        for _ in range(15):
+            try:
+                pyperclip.copy(val)
+                if pyperclip.paste().replace("\r\n", "\n") == want:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.02)
+        return False
+
+    def inject_paste(self):
+        """Salje pravi Ctrl+V u program u fokusu. Nas Ctrl+V hotkey se na
+        trenutak skida da vestacki taster ne bi pokrenuo samog sebe."""
+        h = self.handles.pop("ctrl+v", None)
+        if h is not None:
+            try:
+                keyboard.remove_hotkey(h)
+            except Exception:
+                pass
         try:
-            val = self.data[self.r][self.c]
-        except IndexError:
+            if keyboard.is_pressed("ctrl"):
+                keyboard.send("v")          # Ctrl je vec drzan
+            else:
+                keyboard.send("ctrl+v")
+            time.sleep(0.08)                # daj programu vremena da procita clipboard
+        finally:
+            if h is not None and not self.paused:
+                self.handles["ctrl+v"] = keyboard.add_hotkey(
+                    "ctrl+v", self.on_paste_key, suppress=True)
+
+    def do_paste(self):
+        # Bez ucitane tabele ne diramo clipboard - obican Ctrl+V
+        if not self.data:
+            self.inject_paste()
             return
-        pyperclip.copy(val)
-        time.sleep(0.03)
-        # Ctrl je vec drzan dok pritiskas Ctrl+B, pa saljemo samo V
-        if keyboard.is_pressed("ctrl"):
-            keyboard.send("v")
-        else:
-            keyboard.send("ctrl+v")
+        val = self.data[self.r][self.c]
+        if val != "":
+            if not self.set_clipboard(val):
+                self.status.config(text="Clipboard je zauzet - pokušaj ponovo", fg="#b00020")
+                return                      # ne lepimo nista pogresno
+            time.sleep(0.02)
+            self.inject_paste()
+        # posle lepljenja na sledecu celiju (desno); na kraju reda ostaje
+        if self.c < self.ncols - 1:
+            self.c += 1
+        self.refresh()
 
     # ---------- učitavanje ----------
     def load(self):
@@ -223,6 +267,8 @@ class App:
 
     # ---------- kretanje ----------
     def poll(self):
+        # komande se obradjuju striktno redom, tako da Ctrl+V uvek
+        # vidi tacnu, azurnu poziciju
         try:
             while True:
                 cmd = self.q.get_nowait()
@@ -230,11 +276,13 @@ class App:
                     self.move(cmd[1], cmd[2])
                 elif cmd[0] == "newrow":
                     self.new_row()
+                elif cmd[0] == "paste":
+                    self.do_paste()
                 elif cmd[0] == "pause":
                     self.toggle_pause()
         except queue.Empty:
             pass
-        self.root.after(10, self.poll)
+        self.root.after(5, self.poll)
 
     def move(self, dr, dc):
         if not self.data:
@@ -250,17 +298,27 @@ class App:
         self.r = min(self.nrows - 1, self.r + 1)
         self.refresh()
 
+    def min_row(self):
+        return 1 if self.pin_var.get() else 0
+
+    def top_h(self):
+        return HDR_H + (ROW_H if self.pin_var.get() else 0)
+
     def on_wheel(self, e):
         if not self.data:
             return
-        self.sr = max(0, min(self.nrows - 1, self.sr - (1 if e.delta > 0 else -1) * 3))
+        step = -3 if e.delta > 0 else 3
+        self.sr = max(self.min_row(), min(self.nrows - 1, self.sr + step))
         self.draw()
 
     def on_click(self, e):
-        if not self.data:
+        if not self.data or e.y < HDR_H:
             return
-        i = self.sr + (e.y - HDR_H) // ROW_H
-        if e.y < HDR_H or i >= self.nrows:
+        if self.pin_var.get() and e.y < HDR_H + ROW_H:
+            i = 0
+        else:
+            i = max(self.sr, self.min_row()) + (e.y - self.top_h()) // ROW_H
+        if i >= self.nrows:
             return
         for j, x, w in self.colpos:
             if x <= e.x < x + w:
@@ -272,11 +330,15 @@ class App:
     def ensure_visible(self):
         h = self.canvas.winfo_height()
         w = self.canvas.winfo_width()
-        vis = max(1, (h - HDR_H) // ROW_H)
-        if self.r < self.sr:
-            self.sr = self.r
-        elif self.r >= self.sr + vis:
-            self.sr = self.r - vis + 1
+        minr = self.min_row()
+        vis = max(1, (h - self.top_h()) // ROW_H)
+        if self.sr < minr:
+            self.sr = minr
+        if self.r >= minr:
+            if self.r < self.sr:
+                self.sr = self.r
+            elif self.r >= self.sr + vis:
+                self.sr = self.r - vis + 1
         if self.c < self.sc:
             self.sc = self.c
         else:
@@ -293,8 +355,13 @@ class App:
         val = self.data[self.r][self.c].replace("\n", " ")
         if len(val) > 40:
             val = val[:40] + "…"
+        name = ""
+        if self.pin_var.get() and self.r > 0:
+            hn = self.data[0][self.c].strip()
+            if hn:
+                name = f" ({hn[:25]})"
         self.status.config(
-            text=f"Kolona {get_column_letter(self.c + 1)}, red {self.r + 1}   |   {val}",
+            text=f"Kolona {get_column_letter(self.c + 1)}{name}, red {self.r + 1}   |   {val}",
             fg="black")
 
     def refresh(self):
@@ -302,6 +369,30 @@ class App:
             self.ensure_visible()
         self.update_status()
         self.draw()
+
+    def draw_row(self, i, y, pinned_style=False):
+        cv = self.canvas
+        bg = COL_HDR_ACTIVE if i == self.r else COL_HDR
+        cv.create_rectangle(0, y, RN_W, y + ROW_H, fill=bg, outline="#bbb")
+        cv.create_text(RN_W / 2, y + ROW_H / 2, text=str(i + 1),
+                       font=("Segoe UI", 9, "bold"))
+        for j, x, cw in self.colpos:
+            cur = (i == self.r and j == self.c)
+            if cur:
+                fill = COL_CURSOR
+            elif pinned_style:
+                fill = COL_PINNED
+            else:
+                fill = "white"
+            cv.create_rectangle(x, y, x + cw, y + ROW_H, fill=fill,
+                                outline=COL_CURSOR_BORDER if cur else "#ddd",
+                                width=2 if cur else 1)
+            txt = self.data[i][j].replace("\n", " ")
+            n = max(1, (cw - 8) // CHAR_PX)
+            if len(txt) > n:
+                txt = txt[:n - 1] + "…"
+            cv.create_text(x + 4, y + ROW_H / 2, text=txt, anchor="w",
+                           font=("Segoe UI", 9, "bold" if pinned_style else "normal"))
 
     def draw(self):
         cv = self.canvas
@@ -319,10 +410,7 @@ class App:
             x += self.widths[j]
             j += 1
 
-        nvis = (h - HDR_H) // ROW_H + 1
-        last = min(self.nrows, self.sr + nvis)
-
-        # zaglavlje kolona
+        # zaglavlje kolona (slova)
         cv.create_rectangle(0, 0, RN_W, HDR_H, fill=COL_HDR, outline="#bbb")
         for j, x, cw in self.colpos:
             bg = COL_HDR_ACTIVE if j == self.c else COL_HDR
@@ -330,24 +418,16 @@ class App:
             cv.create_text(x + cw / 2, HDR_H / 2, text=get_column_letter(j + 1),
                            font=("Segoe UI", 9, "bold"))
 
-        for i in range(self.sr, last):
-            y = HDR_H + (i - self.sr) * ROW_H
-            bg = COL_HDR_ACTIVE if i == self.r else COL_HDR
-            cv.create_rectangle(0, y, RN_W, y + ROW_H, fill=bg, outline="#bbb")
-            cv.create_text(RN_W / 2, y + ROW_H / 2, text=str(i + 1),
-                           font=("Segoe UI", 9, "bold"))
-            for j, x, cw in self.colpos:
-                cur = (i == self.r and j == self.c)
-                cv.create_rectangle(x, y, x + cw, y + ROW_H,
-                                    fill=COL_CURSOR if cur else "white",
-                                    outline=COL_CURSOR_BORDER if cur else "#ddd",
-                                    width=2 if cur else 1)
-                txt = self.data[i][j].replace("\n", " ")
-                n = max(1, (cw - 8) // CHAR_PX)
-                if len(txt) > n:
-                    txt = txt[:n - 1] + "…"
-                cv.create_text(x + 4, y + ROW_H / 2, text=txt, anchor="w",
-                               font=("Segoe UI", 9))
+        y = HDR_H
+        pinned = self.pin_var.get()
+        if pinned:
+            self.draw_row(0, y, pinned_style=True)
+            y += ROW_H
+        i = max(self.sr, self.min_row())
+        while i < self.nrows and y < h:
+            self.draw_row(i, y)
+            y += ROW_H
+            i += 1
 
     def on_close(self):
         keyboard.unhook_all()   # vraca normalne Windows tastere
