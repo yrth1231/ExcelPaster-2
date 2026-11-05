@@ -19,6 +19,24 @@ import keyboard
 import pyperclip
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import fills, fonts, borders, alignment, protection
+
+
+# Zaobilazi gresku u nekim xlsx fajlovima:
+# "__init__() got an unexpected keyword argument 'extLst'"
+def _ignore_extlst(cls):
+    orig = cls.__init__
+
+    def init(self, *args, **kwargs):
+        kwargs.pop("extLst", None)
+        orig(self, *args, **kwargs)
+
+    cls.__init__ = init
+
+
+for _cls in (fills.PatternFill, fills.GradientFill, fonts.Font, borders.Border,
+             borders.Side, alignment.Alignment, protection.Protection):
+    _ignore_extlst(_cls)
 
 ROW_H = 22
 HDR_H = 22
