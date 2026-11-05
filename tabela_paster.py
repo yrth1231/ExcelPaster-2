@@ -193,14 +193,8 @@ class App:
                 self.handles[combo] = keyboard.add_hotkey(combo, fn, suppress=True)
 
     def copy_cell(self):
-        """Stavi trenutnu celiju u clipboard (preskace ako je vec tamo)."""
-        val = self.data[self.r][self.c]
-        try:
-            if pyperclip.paste().replace("\r\n", "\n") == val.replace("\r\n", "\n"):
-                return True
-        except Exception:
-            pass
-        return self.set_clipboard(val)
+        """Uvek upisuje trenutnu celiju u clipboard i proverava da je tu."""
+        return self.set_clipboard(self.data[self.r][self.c])
 
     def do_copy(self):
         # Bez ucitane tabele - obican Ctrl+C
@@ -217,15 +211,16 @@ class App:
         if not self.data:
             self.inject_combo("ctrl+v", "v")
             return
+        # 1) provera: u kojoj je celiji indikator (cita se tek sada, na pritisak)
         val = self.data[self.r][self.c]
         if val != "":
-            # clipboard se uvek proverava, pa se lepi bas ova celija
+            # 2) kopiraj bas tu celiju (uvek upisuje, ne oslanja se na stari clipboard)
             if not self.copy_cell():
                 self.status.config(text="Clipboard je zauzet - pokušaj ponovo", fg="#b00020")
                 return                      # ne lepimo nista pogresno
-            time.sleep(0.02)
+            # 3) nalepi
             self.inject_combo("ctrl+v", "v")
-        # posle lepljenja na sledecu celiju (desno); na kraju reda ostaje
+        # 4) tek onda na sledecu celiju (desno); na kraju reda ostaje
         if self.c < self.ncols - 1:
             self.c += 1
         self.refresh()
