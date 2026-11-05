@@ -1,4 +1,4 @@
-name: Build exe
+name: Build exe 
 
 on:
   workflow_dispatch:
