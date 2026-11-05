@@ -2,7 +2,8 @@
 Tabela Paster - Windows program za lepljenje celija iz Excel tabele.
 
 Hotkey-evi (rade samo dok je program upaljen, imaju prednost nad Windowsom):
-    Ctrl+V            nalepi CELIJU u kojoj se nalazis, pa predje na sledecu (desno)
+    Ctrl+C            kopira CELIJU u kojoj se nalazis (bez lepljenja i pomeranja)
+    Ctrl+V            nalepi CELIJU, predje na sledecu (desno) i odmah je kopira
     Ctrl+strelice     kretanje po tabeli (strelice bez Ctrl rade normalno)
     Ctrl+N            novi red, od prve kolone
     Ctrl+Shift+P      pauza / nastavak (privremeno vraca normalne Windows tastere)
@@ -42,6 +43,7 @@ ROW_H = 22
 HDR_H = 22
 RN_W = 44
 CHAR_PX = 7
+PASTE_WAIT = 0.15   # koliko se ceka posle lepljenja (povecaj ako program kasni sa citanjem clipboarda)
 
 COL_CURSOR = "#bcdcff"      # blago plava - trenutna celija
 COL_CURSOR_BORDER = "#2b7de9"
@@ -121,6 +123,9 @@ class App:
     def on_paste_key(self):
         self.q.put(("paste",))
 
+    def on_copy_key(self):
+        self.q.put(("copy",))
+
     def register_hotkeys(self):
         q = self.q
         pairs = [
@@ -130,6 +135,7 @@ class App:
             ("ctrl+down", lambda: q.put(("move", 1, 0))),
             ("ctrl+n", lambda: q.put(("newrow",))),
             ("ctrl+v", self.on_paste_key),
+            ("ctrl+c", self.on_copy_key),
         ]
         for key, fn in pairs:
             self.handles[key] = keyboard.add_hotkey(key, fn, suppress=True)
@@ -166,10 +172,10 @@ class App:
             time.sleep(0.02)
         return False
 
-    def inject_paste(self):
-        """Salje pravi Ctrl+V u program u fokusu. Nas Ctrl+V hotkey se na
+    def inject_combo(self, combo, letter):
+        """Salje pravi Ctrl+<slovo> programu u fokusu. Nas hotkey se na
         trenutak skida da vestacki taster ne bi pokrenuo samog sebe."""
-        h = self.handles.pop("ctrl+v", None)
+        h = self.handles.pop(combo, None)
         if h is not None:
             try:
                 keyboard.remove_hotkey(h)
@@ -177,31 +183,55 @@ class App:
                 pass
         try:
             if keyboard.is_pressed("ctrl"):
-                keyboard.send("v")          # Ctrl je vec drzan
+                keyboard.send(letter)       # Ctrl je vec drzan
             else:
-                keyboard.send("ctrl+v")
-            time.sleep(0.08)                # daj programu vremena da procita clipboard
+                keyboard.send(combo)
+            time.sleep(PASTE_WAIT)          # daj programu vremena da procita clipboard
         finally:
             if h is not None and not self.paused:
-                self.handles["ctrl+v"] = keyboard.add_hotkey(
-                    "ctrl+v", self.on_paste_key, suppress=True)
+                fn = self.on_paste_key if combo == "ctrl+v" else self.on_copy_key
+                self.handles[combo] = keyboard.add_hotkey(combo, fn, suppress=True)
+
+    def copy_cell(self):
+        """Stavi trenutnu celiju u clipboard (preskace ako je vec tamo)."""
+        val = self.data[self.r][self.c]
+        try:
+            if pyperclip.paste().replace("\r\n", "\n") == val.replace("\r\n", "\n"):
+                return True
+        except Exception:
+            pass
+        return self.set_clipboard(val)
+
+    def do_copy(self):
+        # Bez ucitane tabele - obican Ctrl+C
+        if not self.data:
+            self.inject_combo("ctrl+c", "c")
+            return
+        if self.copy_cell():
+            self.update_status(prefix="✓ Kopirano   ")
+        else:
+            self.status.config(text="Clipboard je zauzet - pokušaj ponovo", fg="#b00020")
 
     def do_paste(self):
         # Bez ucitane tabele ne diramo clipboard - obican Ctrl+V
         if not self.data:
-            self.inject_paste()
+            self.inject_combo("ctrl+v", "v")
             return
         val = self.data[self.r][self.c]
         if val != "":
-            if not self.set_clipboard(val):
+            # clipboard se uvek proverava, pa se lepi bas ova celija
+            if not self.copy_cell():
                 self.status.config(text="Clipboard je zauzet - pokušaj ponovo", fg="#b00020")
                 return                      # ne lepimo nista pogresno
             time.sleep(0.02)
-            self.inject_paste()
+            self.inject_combo("ctrl+v", "v")
         # posle lepljenja na sledecu celiju (desno); na kraju reda ostaje
         if self.c < self.ncols - 1:
             self.c += 1
         self.refresh()
+        # unapred kopiraj novu celiju, da je sledeci Ctrl+V vec spreman
+        if self.data[self.r][self.c] != "":
+            self.copy_cell()
 
     # ---------- učitavanje ----------
     def load(self):
@@ -278,6 +308,8 @@ class App:
                     self.new_row()
                 elif cmd[0] == "paste":
                     self.do_paste()
+                elif cmd[0] == "copy":
+                    self.do_copy()
                 elif cmd[0] == "pause":
                     self.toggle_pause()
         except queue.Empty:
@@ -345,7 +377,7 @@ class App:
             while self.sc < self.c and sum(self.widths[self.sc:self.c + 1]) > w - RN_W:
                 self.sc += 1
 
-    def update_status(self):
+    def update_status(self, prefix=""):
         if self.paused:
             self.status.config(text="PAUZIRANO - normalni Windows tasteri", fg="#b00020")
             return
@@ -361,7 +393,7 @@ class App:
             if hn:
                 name = f" ({hn[:25]})"
         self.status.config(
-            text=f"Kolona {get_column_letter(self.c + 1)}{name}, red {self.r + 1}   |   {val}",
+            text=f"{prefix}Kolona {get_column_letter(self.c + 1)}{name}, red {self.r + 1}   |   {val}",
             fg="black")
 
     def refresh(self):
